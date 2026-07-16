@@ -11,6 +11,7 @@ import { AgdaController, LS_DOC_KEY } from '$lib/controller.svelte'
 import { withDriveLock } from '$lib'
 import { makeBufUint32LE } from '$lib/stdlib'
 import { myCodeMirrorTheme } from '$lib/codemirror/theme'
+import { patchBasicSetup, symbolInput } from '$lib/codemirror/symbol-input'
 import { agdaSupport } from '$lib/agda'
 
 import { clearRunningInfo, emitRunningInfo } from '$lib/agda/effects'
@@ -59,11 +60,12 @@ function codeMirror(el) {
     doc: localStorage.getItem(LS_DOC_KEY) ?? 'open import Agda.Primitive\n',
     parent: el,
     extensions: [
-      basicSetup,
+      patchBasicSetup(basicSetup),
       myCodeMirrorTheme(),
       basicTheme,
       agdaSupport(),
       agdaController.lspClientCompartment.of([]),
+      symbolInput(),
       EditorState.changeFilter.of(tr => {
         for (const e of tr.effects) {
           if (e.is(emitRunningInfo)) {

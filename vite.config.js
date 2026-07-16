@@ -53,6 +53,9 @@ export default defineConfig(async ({ command }) => {
     // bumped for TLA
     target: ['es2022', 'edge89', 'firefox89', 'chrome89', 'safari15'],
   },
+  esbuild: {
+    keepNames: true,
+  },
   worker: {
     format: 'es',
   },
