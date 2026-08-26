@@ -1,5 +1,5 @@
-import { EditorSelection, Prec, StateEffect, StateField, Transaction } from "@codemirror/state";
-import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, showTooltip } from "@codemirror/view";
+import { Prec, StateEffect, StateField, Transaction } from "@codemirror/state";
+import { Decoration, EditorView, ViewPlugin, WidgetType, highlightSpecialChars, keymap, showTooltip } from "@codemirror/view";
 import { isolateHistory, undo } from "@codemirror/commands";
 //#endregion
 //#region packages/app/src/lib/codemirror/symbol-input/utils.ts
@@ -12,6 +12,9 @@ function scrollIntoView(container, element) {
     let scaleY = parent.height / container.offsetHeight;
     if (self.top < parent.top) container.scrollTop -= (parent.top - self.top) / scaleY;
     else if (self.bottom > parent.bottom) container.scrollTop += (self.bottom - parent.bottom) / scaleY;
+}
+function toUnicodeRepr(n) {
+    return n.toString(16).padStart(4, "0").toUpperCase();
 }
 //#endregion
 //#region packages/app/src/lib/codemirror/symbol-input/tooltip.ts
@@ -36,7 +39,7 @@ function genMarkEl(s, matches) {
 }
 function dispChar(view, c) {
     const span = createElement(view, "span");
-    const cp = "U+" + c.codePointAt(0).toString(16).padStart(4, "0").toUpperCase();
+    const cp = "U+" + toUnicodeRepr(c.codePointAt(0));
     if (c.match(/\p{Mn}/u)) {
         span.textContent = "◌" + c;
         span.classList = "symbol mono";
@@ -45,7 +48,7 @@ function dispChar(view, c) {
         span.classList = "symbol alt";
     } else if (c.match(/\p{C}/u)) {
         span.textContent = "(" + cp + ")";
-        span.classList = "symbol alt";
+        span.classList = "symbol unic";
     } else {
         span.textContent = c;
         span.classList = "symbol mono";
@@ -86,12 +89,12 @@ var CandidateDialog = class CandidateDialog {
         if (istate.matches !== this.lastMatchResult) {
             this.lastMatchResult = istate.matches;
             this.lastSelection = istate.selection;
-            this.dom.innerHTML = "";
+            this.dom.textContent = "";
             const container = createElement(this.view, "div");
             if (istate.matches.exactMatches.length) {
                 const desc = createElement(this.view, "div");
                 desc.classList = "desc";
-                desc.textContent = `${istate.text}:`;
+                desc.textContent = `${istate.text.replace(/ /g, "␣")} [×${istate.matches.exactMatches.length}]`;
                 container.appendChild(desc);
                 const ul = createElement(this.view, "ul");
                 ul.classList = "exact";
@@ -110,8 +113,15 @@ var CandidateDialog = class CandidateDialog {
                 const { item, value, matches } = istate.matches.candidates[i];
                 const li = createElement(this.view, "li");
                 li.appendChild(dispChar(this.view, value[0]));
-                li.appendChild(genMarkEl(item, matches));
-                if (value.length > 1) li.append(` (+${value.length - 1})`);
+                const label = genMarkEl(item, matches);
+                label.classList = "label";
+                li.appendChild(label);
+                if (value.length > 1) {
+                    const more = createElement(this.view, "span");
+                    more.classList = "has-more";
+                    more.textContent = ` (+${value.length - 1})`;
+                    li.append(more);
+                }
                 if (!istate.selection.onExactMatch && i == istate.selection.selectedIndex) li.classList.add("selected");
                 ul.appendChild(li);
             }
@@ -4807,6 +4817,7 @@ function fzfMatchEngine(dict) {
     return (s) => {
         const exactMatches = dict[s] ?? [];
         const candidates = [];
+        const t0 = Date.now();
         for (const { item, score, positions } of coll.find(s)) {
             if (item === s) continue;
             candidates.push({
@@ -4816,6 +4827,8 @@ function fzfMatchEngine(dict) {
                 matches: positionsToIntervals(Array.from(positions).sort((a, b) => a - b))
             });
         }
+        const elp = Date.now() - t0;
+        if (elp > 50) console.warn("Filtering on candidates takes too long", elp);
         return {
             exactMatches,
             candidates
@@ -4823,8 +4836,6 @@ function fzfMatchEngine(dict) {
     };
 }
 const fzfMatcher = () => fzfMatchEngine(dict_default);
-//#endregion
-//#region packages/app/src/lib/codemirror/symbol-input/state.ts
 const siBufferAppend = StateEffect.define();
 const siBufferBackspace = StateEffect.define();
 const siBufferClear = StateEffect.define();
@@ -4884,7 +4895,6 @@ var SymbolInputState = class SymbolInputState {
             if (e.value.insert !== "\\") throw new Error("The symbol input sequence should begin with \"\\\"");
             state = new SymbolInputState("", null);
         } else {
-            if (e.value.insert.includes(tr.state.lineBreak)) throw new Error("The symbol input sequence should not contain newlines");
             const newText = state.text + e.value.insert;
             const mat = fzfMatch(newText);
             state = new SymbolInputState(newText, hasResult(mat) ? state.tooltip ?? this.createTooltip(tr.state) : null, mat, {
@@ -4896,7 +4906,10 @@ var SymbolInputState = class SymbolInputState {
             const newText = state.text == null || state.text === "" ? null : state.text.slice(0, -1);
             if (newText) {
                 const mat = fzfMatch(newText);
-                state = new SymbolInputState(newText, hasResult(mat) ? state.tooltip ?? this.createTooltip(tr.state) : null, mat);
+                state = new SymbolInputState(newText, hasResult(mat) ? state.tooltip ?? this.createTooltip(tr.state) : null, mat, {
+                    onExactMatch: state.selection.onExactMatch && !!mat.exactMatches.length || !mat.candidates.length,
+                    selectedIndex: 0
+                });
             } else state = newText == null ? SymbolInputState.initial : new SymbolInputState(newText, null);
         } else if (e.is(siBufferClear)) state = SymbolInputState.initial;
         else if (e.is(siMoveSelection)) {
@@ -4934,26 +4947,13 @@ var SymbolInputState = class SymbolInputState {
     };
     static initial = new SymbolInputState(null, null, SymbolInputState.emptyResult, SymbolInputState.initialSelection);
 };
-const symbolInputState = StateField.define({
-    create() {
-        return SymbolInputState.initial;
-    },
-    update(value, tr) {
-        return value.update(tr);
-    },
-    provide(f) {
-        return showTooltip.compute([f], (state) => {
-            return state.field(f).tooltip ?? null;
-        });
-    }
-});
-//#endregion
-//#region packages/app/src/lib/codemirror/symbol-input/plugin.ts
 var InputBufferInlineWidget = class extends WidgetType {
     text;
-    constructor(text) {
+    noMatch;
+    constructor(text, noMatch) {
         super();
         this.text = text;
+        this.noMatch = noMatch;
     }
     toDOM(view) {
         const dom = createElement(view, "span");
@@ -4963,25 +4963,32 @@ var InputBufferInlineWidget = class extends WidgetType {
     }
     updateDOM(dom, _view, _from) {
         dom.textContent = "\\" + this.text;
+        dom.classList.toggle("no-match", this.noMatch);
         return true;
     }
 };
-const symbolInputPlugin = ViewPlugin.fromClass(class ImeInputPluginValue {
-    view;
-    mainIndex = -1;
-    ranges = [];
-    constructor(view) {
-        this.view = view;
+const symbolInputState = StateField.define({
+    create() {
+        return SymbolInputState.initial;
+    },
+    update(value, tr) {
+        return value.update(tr);
+    },
+    provide(f) {
+        return [EditorView.decorations.compute([f], (state) => {
+            const istate = state.field(f);
+            if (!istate.active) return Decoration.none;
+            const text = istate.text;
+            const widgets = state.selection.ranges.map(({ to }) => Decoration.replace({ widget: new InputBufferInlineWidget(text, text != "" && !hasResult(istate.matches)) }).range(to - 1, to));
+            return Decoration.set(widgets, true);
+        }), showTooltip.from(f, (istate) => istate.tooltip ?? null)];
     }
+});
+//#endregion
+//#region packages/app/src/lib/codemirror/symbol-input/plugin.ts
+const symbolInputPlugin = ViewPlugin.fromClass(class SymbolInputPluginValue {
     update(upd) {
         const istate = upd.state.field(symbolInputState);
-        if (!istate.active) {
-            this.mainIndex = -1;
-            this.ranges.length = 0;
-        } else if (upd.selectionSet) {
-            this.mainIndex = upd.state.selection.mainIndex;
-            this.ranges = upd.state.selection.ranges.map(({ to }) => EditorSelection.single(to - 1, to).ranges[0]);
-        }
         const compDialog = upd.view.dom.querySelector(".cm-tooltip-autocomplete");
         if (compDialog) {
             const active = istate.active;
@@ -4989,18 +4996,10 @@ const symbolInputPlugin = ViewPlugin.fromClass(class ImeInputPluginValue {
             compDialog.classList.toggle("overridden-by-ime", active);
         }
     }
-    get decorations() {
-        const istate = this.view.state.field(symbolInputState);
-        if (!istate.active) return Decoration.none;
-        const text = istate.text;
-        const widgets = this.ranges.map((x) => Decoration.replace({ widget: new InputBufferInlineWidget(text) }).range(x.from, x.to));
-        return Decoration.set(widgets, true);
-    }
-}, { decorations: (v) => v.decorations });
+});
 function scrollInputBufferIntoView(view) {
-    const plugin = view.plugin(symbolInputPlugin);
-    if (!plugin) return;
-    const sel = plugin.ranges[plugin.mainIndex];
+    if (!view.plugin(symbolInputPlugin)) return;
+    const sel = view.state.selection.main;
     if (!sel) return;
     view.dispatch({ effects: EditorView.scrollIntoView(sel) });
 }
@@ -5024,21 +5023,24 @@ function moveSelection(dir) {
         return true;
     };
 }
-const cancelSymbolInput = (view) => {
-    if (!view.state.field(symbolInputState).active) return false;
+const withInputState = (cb) => {
+    return (view) => {
+        const istate = view.state.field(symbolInputState);
+        if (!istate.active) return false;
+        return cb(view, istate);
+    };
+};
+const cancelSymbolInput = withInputState((view) => {
     undo(view);
     return true;
-};
-const backspaceSymbolInput = (view) => {
-    if (!view.state.field(symbolInputState).active) return false;
+});
+const backspaceSymbolInput = withInputState((view) => {
     view.dispatch({ effects: siBufferBackspace.of(null) });
     if (!view.state.field(symbolInputState).active) undo(view);
     else scrollInputBufferIntoView(view);
     return true;
-};
-const acceptSymbolInput = (view) => {
-    const istate = view.state.field(symbolInputState);
-    if (!istate.active) return false;
+});
+const acceptSymbolInput = withInputState((view, istate) => {
     if (istate.text === "") {
         undo(view);
         view.dispatch({
@@ -5057,7 +5059,11 @@ const acceptSymbolInput = (view) => {
         return true;
     }
     return false;
-};
+});
+const acceptSymbolInputViaSpace = withInputState((view, istate) => {
+    if (istate.text == null || istate.text.match(/^(?:\+ *| +|$)/)) return false;
+    return acceptSymbolInput(view);
+});
 const symbolInputKeymap = keymap.of([
     {
         key: "Backspace",
@@ -5070,6 +5076,10 @@ const symbolInputKeymap = keymap.of([
     {
         key: "Enter",
         run: acceptSymbolInput
+    },
+    {
+        key: "Space",
+        run: acceptSymbolInputViaSpace
     },
     {
         key: "ArrowUp",
@@ -5096,21 +5106,33 @@ const symbolInputTheme = EditorView.baseTheme({
         background: "#999",
         color: "#333"
     },
+    ".input-buffer-inline.no-match": {
+        background: "#9003",
+        color: "#fcc"
+    },
     ".symbol-input-candidates": {
         minWidth: "10em",
         maxHeight: "200px",
         maxWidth: "400px",
         overflow: "auto"
     },
+    ".symbol-input-candidates .symbol": { fontSize: "1.25rem" },
+    ".symbol-input-candidates .unic": { fontSize: ".5rem" },
+    ".symbol-input-candidates .label": { fontFamily: "var(--font-monospace, monospace)" },
+    ".symbol-input-candidates li .has-more": {
+        fontSize: ".8rem",
+        fontStyle: "italic"
+    },
+    ".symbol-input-candidates .label mark": { background: "#DFB431" },
     ".symbol-input-candidates .desc": {
-        color: "#555",
+        color: "#888",
         fontSize: ".75em",
         fontFamily: "var(--font-monospace, monospace)",
         whiteSpace: "pre"
     },
-    ".symbol-input-candidates li > .symbol.alt": { color: "#555" },
+    ".symbol-input-candidates li > .symbol.alt": { color: "#888" },
     ".symbol-input-candidates li > .symbol": {
-        minWidth: "1.5em",
+        minWidth: "1.25em",
         display: "inline-block",
         textAlign: "center"
     },
@@ -5122,10 +5144,20 @@ const symbolInputTheme = EditorView.baseTheme({
     },
     ".symbol-input-candidates ul.exact": {
         display: "grid",
-        gridTemplateColumns: "repeat(8, 1fr)",
+        gridTemplateColumns: `repeat(8, 1fr)`,
         borderBottom: "1px solid black"
     },
     ".symbol-input-candidates ul.exact > li": { textAlign: "center" },
+    ".symbol-input-candidates ul.matches > li": {
+        display: "flex",
+        gap: "4px",
+        alignItems: "baseline",
+        marginTop: "2px"
+    },
+    ".symbol-input-candidates ul.matches > li .symbol.mono": {
+        minWidth: "1.75em",
+        background: "#8886"
+    },
     ".symbol-input-candidates .selected": {
         color: "#fff",
         background: "#000"
@@ -5139,6 +5171,31 @@ const symbolInputTheme = EditorView.baseTheme({
     ".cm-tooltip-autocomplete-disabled.overridden-by-ime": {
         color: "#777",
         background: "#ccc"
+    }
+});
+//#endregion
+//#region packages/app/src/lib/codemirror/symbol-input/special-chars.ts
+const specialCharDescs = {
+    160: "No-Break Space",
+    173: "Soft Hyphen",
+    8193: "Em Quad",
+    8196: "Three-Per-Em Space",
+    8197: "Four-Per-Em Space",
+    8204: "Zero Width Non-Joiner",
+    8239: "Narrow No-Break Space"
+};
+const highlightMoreSpecialChars = highlightSpecialChars({
+    addSpecialChars: /[\u00a0\u2001\u2004\u2005\u200c\u202f]/,
+    render(code, _desc, ph) {
+        const ent = specialCharDescs[code];
+        if (!ent) return null;
+        const span = document.createElement("span");
+        span.textContent = ph;
+        const desc = `${ent} (U+${toUnicodeRepr(code)})`;
+        span.title = desc;
+        span.setAttribute("aria-label", desc);
+        span.className = "cm-specialChar";
+        return span;
     }
 });
 //#endregion
@@ -5175,7 +5232,8 @@ function symbolInput(options = {}) {
         symbolInputPlugin,
         Prec.highest(inputHandler),
         Prec.highest(symbolInputKeymap),
-        symbolInputTheme
+        symbolInputTheme,
+        highlightMoreSpecialChars
     ];
 }
 //#endregion
