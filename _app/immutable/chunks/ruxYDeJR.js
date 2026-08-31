@@ -1,0 +1,1 @@
+var u=Object.defineProperty;var t=(n,o)=>u(n,"name",{value:o,configurable:!0});import{aB as e,be as a,Z as c,bb as f}from"./B4fAe2ce.js";function s(n){c===null&&e(),a(()=>{const o=f(n);if(typeof o=="function")return o})}t(s,"onMount");function l(n){c===null&&e(),s(()=>()=>f(n))}t(l,"onDestroy");export{s as a,l as o};
